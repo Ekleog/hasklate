@@ -77,6 +77,8 @@ hsExp (HsVar (UnQual (HsSymbol s))) =
     MirVar $ "symbol_0x" ++ (concat $ fmap (\x -> printf "%02x" (ord x)) s) ++ "_"
 hsExp (HsInfixApp lhs (HsQVarOp op) rhs) =
     hsExp $ HsApp (HsApp (HsVar op) lhs) rhs
+hsExp (HsParen exp) =
+    hsExp exp
 
 toCpp :: Mir -> String
 toCpp x =
@@ -119,7 +121,7 @@ declToCpp p d@(MirDecl {args = []}) =
     trace (show d ++ "\n") $
     p ++ "template <typename T>\n" ++
     p ++ "using " ++ (name d) ++ " = " ++
-    (expToCpp (value d) (True, True)) ++ "<T>;\n\n"
+    (expToCpp (value d) (True, True)) ++ ";\n\n"
 declToCpp p d@(MirDecl {args = (a:as)}) =
     trace (show d ++ "\n") $
     p ++"template <typename " ++ a ++ ">\n" ++
@@ -136,9 +138,10 @@ expToCpp (MirInt i) _ =
 expToCpp (MirApp f x) (fc, oc) =
     (if oc then "typename " else "") ++
     (expToCpp f (True, False)) ++ "<" ++ (expToCpp x (False, False)) ++ ">::" ++
-    (if fc then "template " else "") ++ "value"
-expToCpp (MirVar x) _ =
-    x
+    (if fc then "template " else "") ++ "value" ++
+    (if oc then "<T>" else if fc then "" else "<unit>")
+expToCpp (MirVar x) (fc, oc) =
+    x ++ (if oc then "<T>" else "")
 
 hasklate :: String -> String
 hasklate =
