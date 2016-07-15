@@ -1,0 +1,6 @@
+.*.swp
+*.o
+*.hi
+*.cpp
+main
+a.out
