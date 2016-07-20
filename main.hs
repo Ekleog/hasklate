@@ -68,13 +68,19 @@ hsValue (HsUnGuardedRhs v) =
     hsExp v
 
 symbols :: [String]
-symbols = ["-", "*", "==", "/="]
+symbols = ["+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">="]
 
 symbolName :: String -> String
+symbolName "+" = "symbol_plus"
 symbolName "-" = "symbol_minus"
 symbolName "*" = "symbol_times"
+symbolName "/" = "symbol_divides"
 symbolName "==" = "symbol_equals"
 symbolName "/=" = "symbol_different"
+symbolName "<" = "symbol_lessthan"
+symbolName ">" = "symbol_greaterthan"
+symbolName "<=" = "symbol_lessequal"
+symbolName ">=" = "symbol_greaterequal"
 
 cppSymbol :: String -> String
 cppSymbol "/=" = "!="
@@ -140,13 +146,18 @@ prologueCpp =
 defineSymbol :: String -> String
 defineSymbol x =
    "struct " ++ (symbolName x) ++ " {\n\
+   \    template <int a, int b>\n\
+   \    struct impl {\n\
+   \        static const int result = a " ++ (cppSymbol x) ++ " b;\n\
+   \    };\n\
+   \\n\
    \    struct value {\n\
    \        template <class x>\n\
    \        struct call {\n\
    \            struct value {\n\
    \                template <class y>\n\
    \                struct call {\n\
-   \                    using value = typename num<x::value::evaluate " ++ (cppSymbol x) ++ " y::value::evaluate>::value;\n\
+   \                    using value = typename num<impl<x::value::evaluate, y::value::evaluate>::result>::value;\n\
    \                };\n\
    \            };\n\
    \        };\n\
