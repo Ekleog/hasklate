@@ -12,8 +12,9 @@ import Text.Printf
 import Debug.Trace
 
 data MirExp = MirInt Integer
-            | MirApp MirExp MirExp
+            | MirApp MirExp MirExp -- f x
             | MirVar String
+            | MirIf MirExp MirExp MirExp -- cond true false
     deriving Show
 
 data MirDecl = MirDecl {name :: String, value :: MirExp, args :: [String]}
@@ -66,6 +67,19 @@ hsValue :: HsRhs -> MirExp
 hsValue (HsUnGuardedRhs v) =
     hsExp v
 
+symbols :: [String]
+symbols = ["-", "*", "==", "/="]
+
+symbolName :: String -> String
+symbolName "-" = "symbol_minus"
+symbolName "*" = "symbol_times"
+symbolName "==" = "symbol_equals"
+symbolName "/=" = "symbol_different"
+
+cppSymbol :: String -> String
+cppSymbol "/=" = "!="
+cppSymbol a = a
+
 hsExp :: HsExp -> MirExp
 hsExp (HsLit (HsInt i)) =
     MirInt i
@@ -74,9 +88,11 @@ hsExp (HsApp f x) =
 hsExp (HsVar (UnQual (HsIdent x))) =
     MirVar x
 hsExp (HsVar (UnQual (HsSymbol s))) =
-    MirVar $ "symbol_0x" ++ (concat $ fmap (\x -> printf "%02x" (ord x)) s) ++ "_"
+    MirVar (symbolName s)
 hsExp (HsInfixApp lhs (HsQVarOp op) rhs) =
     hsExp $ HsApp (HsApp (HsVar op) lhs) rhs
+hsExp (HsIf cond true false) =
+    MirIf (hsExp cond) (hsExp true) (hsExp false)
 hsExp (HsParen exp) =
     hsExp exp
 
@@ -90,58 +106,93 @@ prologueCpp =
    \\n\
    \template <int I>\n\
    \struct num {\n\
-   \    template <typename T>\n\
-   \    using value = num<I>;\n\
-   \\n\
-   \    static const int evaluate = I;\n\
+   \    struct value {\n\
+   \        static const int evaluate = I;\n\
+   \    };\n\
    \};\n\
    \\n\
-   \template <typename x>\n\
-   \struct symbol_0x2b_ { // '+'\n\
-   \    template <typename y>\n\
-   \    struct result {\n\
-   \        template <typename T>\n\
-   \        using value = num<x::evaluate + y::evaluate>;\n\
+   \template <bool B>\n\
+   \struct cond {\n\
+   \    struct value {\n\
+   \        static const bool evaluate = B;\n\
    \    };\n\
+   \};\n\
    \\n\
-   \    template <typename T>\n\
-   \    using value = result<T>;\n\
-   \};\n\n"
+   \\n\
+   \template <bool Cond, class True, class False>\n\
+   \struct if_impl;\n\
+   \template <class True, class False>\n\
+   \struct if_impl<true, True, False> {\n\
+   \    using value = typename True::value;\n\
+   \};\n\
+   \template <class True, class False>\n\
+   \struct if_impl<false, True, False> {\n\
+   \    using value = typename False::value;\n\
+   \};\n\
+   \\n\
+   \template <class Cond, class True, class False>\n\
+   \struct if_ {\n\
+   \    using value = typename if_impl<Cond::value::evaluate, True, False>::value;\n\
+   \};\n\
+   \\n" ++
+   concat (fmap defineSymbol symbols)
+
+defineSymbol :: String -> String
+defineSymbol x =
+   "struct " ++ (symbolName x) ++ " {\n\
+   \    struct value {\n\
+   \        template <class x>\n\
+   \        struct call {\n\
+   \            struct value {\n\
+   \                template <class y>\n\
+   \                struct call {\n\
+   \                    using value = typename num<x::value::evaluate " ++ (cppSymbol x) ++ " y::value::evaluate>::value;\n\
+   \                };\n\
+   \            };\n\
+   \        };\n\
+   \    };\n\
+   \};\n\
+   \\n"
 
 epilogueCpp :: String
 epilogueCpp =
    "#include <iostream>\n\
    \int main() {\n\
-   \    std::cout << main_<unit>::evaluate << '\\n';\n\
+   \    std::cout << main_::value::evaluate << '\\n';\n\
    \}\n"
 
 -- String: prefix to put in front of all lines
 declToCpp :: String -> MirDecl -> String
-declToCpp p d@(MirDecl {args = []}) =
-    trace (show d ++ "\n") $
-    p ++ "template <typename T>\n" ++
-    p ++ "using " ++ (name d) ++ " = " ++
-    (expToCpp (value d) (True, True)) ++ ";\n\n"
-declToCpp p d@(MirDecl {args = (a:as)}) =
-    trace (show d ++ "\n") $
-    p ++"template <typename " ++ a ++ ">\n" ++
-    p ++ "struct " ++ (name d) ++ " {\n" ++
-    declToCpp (p ++ "    ") (MirDecl {name = name d ++ "I", value = value d, args = as}) ++
-    p ++ "    template <typename T>\n" ++
-    p ++ "    using value = " ++ name d ++ "I<T>;\n" ++
+declToCpp p d =
+   trace (show d ++ "\n") $
+   p ++ "struct " ++ (name d) ++ " {\n" ++
+   declToCppInner (p ++ "    ") (args d) (value d) ++
+   p ++ "};\n\n"
+
+declToCppInner :: String -> [String] -> MirExp -> String
+declToCppInner p [] v =
+    p ++ "using value = " ++ (expToCpp v True) ++ "::value;\n"
+declToCppInner p (a:as) v =
+    p ++ "struct value {\n" ++
+    p ++ "    template <typename " ++ a ++ ">\n" ++
+    p ++ "    struct call {\n" ++
+    declToCppInner (p ++ "        ") as v ++
+    p ++ "    };\n" ++
     p ++ "};\n\n"
 
--- (Bool, Bool): (is function immediately called, is it outmost level call)
-expToCpp :: MirExp -> (Bool, Bool) -> String
+-- Bool : With maybe prefixing "typename "
+expToCpp :: MirExp -> Bool -> String
 expToCpp (MirInt i) _ =
     "num<" ++ show i ++ ">"
-expToCpp (MirApp f x) (fc, oc) =
-    (if oc then "typename " else "") ++
-    (expToCpp f (True, False)) ++ "<" ++ (expToCpp x (False, False)) ++ ">::" ++
-    (if fc then "template " else "") ++ "value" ++
-    (if oc then "<T>" else if fc then "" else "<unit>")
-expToCpp (MirVar x) (fc, oc) =
-    x ++ (if oc then "<T>" else "")
+expToCpp (MirApp f x) pft =
+    (if pft then "typename " else "") ++
+    (expToCpp f False) ++ "::value::template call<" ++ (expToCpp x True) ++ ">"
+expToCpp (MirVar x) _ =
+    x
+expToCpp (MirIf cond true false) pft =
+    (if pft then "typename " else "") ++
+    "if_<" ++ (expToCpp cond True) ++ "::value, " ++
+    (expToCpp true True) ++ ", " ++ (expToCpp false True) ++ ">"
 
 hasklate :: String -> String
 hasklate =
