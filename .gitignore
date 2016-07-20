@@ -3,6 +3,7 @@
 *.hi
 *.cpp
 Main
+main
 a.out
 dist
 cabal-dev
