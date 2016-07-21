@@ -2,7 +2,7 @@
 *.o
 *.hi
 *.cpp
-main
+Main
 a.out
 dist
 cabal-dev
