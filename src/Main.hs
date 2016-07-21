@@ -11,6 +11,7 @@ import Text.Printf
 
 import Debug.Trace
 
+-- Data declarations
 data MirExp = MirInt Integer
             | MirApp MirExp MirExp -- f x
             | MirVar String
@@ -22,6 +23,27 @@ data MirDecl = MirDecl {name :: String, value :: MirExp, args :: [String]}
 
 type Mir = [MirDecl]
 
+-- Symbol declarations
+symbols :: [String]
+symbols = ["+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">="]
+
+symbolName :: String -> String
+symbolName "+" = "symbol_plus"
+symbolName "-" = "symbol_minus"
+symbolName "*" = "symbol_times"
+symbolName "/" = "symbol_divides"
+symbolName "==" = "symbol_equals"
+symbolName "/=" = "symbol_different"
+symbolName "<" = "symbol_lessthan"
+symbolName ">" = "symbol_greaterthan"
+symbolName "<=" = "symbol_lessequal"
+symbolName ">=" = "symbol_greaterequal"
+
+cppSymbol :: String -> String
+cppSymbol "/=" = "!="
+cppSymbol a = a
+
+-- Actual program
 fromHaskell :: String -> Mir
 fromHaskell =
     toMir . fromHaskellParse . parseModule
@@ -62,39 +84,20 @@ hsPVar (HsPVar v) = v
 hsName :: HsName -> String
 hsName (HsIdent name) =
     name
+hsName (HsSymbol symb) =
+    symbolName symb
 
 hsValue :: HsRhs -> MirExp
 hsValue (HsUnGuardedRhs v) =
     hsExp v
-
-symbols :: [String]
-symbols = ["+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">="]
-
-symbolName :: String -> String
-symbolName "+" = "symbol_plus"
-symbolName "-" = "symbol_minus"
-symbolName "*" = "symbol_times"
-symbolName "/" = "symbol_divides"
-symbolName "==" = "symbol_equals"
-symbolName "/=" = "symbol_different"
-symbolName "<" = "symbol_lessthan"
-symbolName ">" = "symbol_greaterthan"
-symbolName "<=" = "symbol_lessequal"
-symbolName ">=" = "symbol_greaterequal"
-
-cppSymbol :: String -> String
-cppSymbol "/=" = "!="
-cppSymbol a = a
 
 hsExp :: HsExp -> MirExp
 hsExp (HsLit (HsInt i)) =
     MirInt i
 hsExp (HsApp f x) =
     MirApp (hsExp f) (hsExp x)
-hsExp (HsVar (UnQual (HsIdent x))) =
-    MirVar x
-hsExp (HsVar (UnQual (HsSymbol s))) =
-    MirVar (symbolName s)
+hsExp (HsVar (UnQual name)) =
+    MirVar (hsName name)
 hsExp (HsInfixApp lhs (HsQVarOp op) rhs) =
     hsExp $ HsApp (HsApp (HsVar op) lhs) rhs
 hsExp (HsIf cond true false) =
