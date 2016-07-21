@@ -1,4 +1,3 @@
 # hasklate
 
-Haskell to C++ metaprogramming transpiler 
-
+Haskell to C++ metaprogramming transpiler

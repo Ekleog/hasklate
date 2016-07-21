@@ -1,7 +1,7 @@
 name:                  hasklate
 version:               0.1.0.0
-synopsis:              Haskell to C++ metaprogramming transpiler 
-description:           Haskell to C++ metaprogramming transpiler 
+synopsis:              Haskell to C++ metaprogramming transpiler
+description:           Haskell to C++ metaprogramming transpiler
 homepage:              https://github.com/ekleog/hasklate#readme
 bug-reports:           https://github.com/ekleog/hasklate/issues
 author:                Léo Gaspard
@@ -24,4 +24,3 @@ executable hasklate
 source-repository head
   type:                git
   location:            https://github.com/ekleog/hasklate
-
