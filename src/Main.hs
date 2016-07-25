@@ -18,7 +18,12 @@ data MirExp = MirInt Integer
             | MirIf MirExp MirExp MirExp -- cond true false
     deriving Show
 
-data MirDecl = MirDecl {name :: String, value :: MirExp, args :: [String]}
+data MirArg = MirArgVar String
+            | MirArgPat String
+    deriving Show
+
+data MirDecl = MirFunDecl  {name :: String, value :: MirExp, args :: [MirArg]}
+             | MirDataDecl {name :: String, ctors :: [String]}
     deriving Show
 
 type Mir = [MirDecl]
@@ -54,32 +59,41 @@ fromHaskellParse (ParseOk p) =
 
 toMir :: HsModule -> Mir
 toMir (HsModule src mod exp imp code) =
-    fmap declToMir code
+    concat (fmap declToMir code)
 
-declToMir :: HsDecl -> MirDecl
+declToMir :: HsDecl -> [MirDecl]
 -- declToMir (HsTypeDecl src name names type) = show
--- declToMir (HsDataDecl src context name names condecls qnames) = show
+declToMir (HsDataDecl src context name names condecls qnames) =
+    [MirDataDecl {name = hsName name, ctors = fmap hsConDecl condecls}]
 -- declToMir (HsInfixDecl src assoc int ops) = show
 -- declToMir (HsNewTypeDecl src context name names condecl qnames) = show
 -- declToMir (HsClassDecl src context name names decls) = show
 -- declToMir (HsInstDecl src context qname types decls) = show
 -- declToMir (HsDefaultDecl src types) = show
 -- declToMir (HsTypeSig src names qualtype) = show
-declToMir (HsFunBind [match]) =
-    trace (show match) $ matchToMir match
+declToMir (HsFunBind match) =
+    fmap matchToMir match
 declToMir (HsPatBind src (HsPVar pat) rhs decls) =
-    trace (show (pat, rhs, decls)) $ MirDecl {name = hsName pat, value = hsValue rhs, args = []}
+    trace (show (pat, rhs, decls)) $ [MirFunDecl {name = hsName pat, value = hsValue rhs, args = []}]
 -- declToMir (HsForeignImport src str safety str_ name type) = show
 -- declToMir (HsForeignExport src str str_ name type) = show
 declToMir x =
-    trace (show x) $ MirDecl {name = "UNIMPLEMENTED", value = MirInt 42, args = []} -- fallback :'(
+    trace (show x) $ [MirFunDecl {name = "UNIMPLEMENTED", value = MirInt 42, args = []}] -- fallback :'(
 
 matchToMir :: HsMatch -> MirDecl
-matchToMir (HsMatch src name pats rhs decls) =
-    MirDecl {name = hsName name, value = hsValue rhs, args = fmap (hsName . hsPVar) pats}
+matchToMir m@(HsMatch src name pats rhs decls) =
+    trace (show m) $
+    MirFunDecl {name = hsName name, value = hsValue rhs, args = fmap hsPat pats}
 
-hsPVar :: HsPat -> HsName
-hsPVar (HsPVar v) = v
+hsConDecl :: HsConDecl -> String
+hsConDecl (HsConDecl _ name _) =
+    hsName name
+
+hsPat :: HsPat -> MirArg
+hsPat (HsPVar v) =
+    MirArgVar (hsName v)
+hsPat (HsPApp (UnQual name) []) =
+    MirArgPat (hsName name)
 
 hsName :: HsName -> String
 hsName (HsIdent name) =
@@ -97,6 +111,8 @@ hsExp (HsLit (HsInt i)) =
 hsExp (HsApp f x) =
     MirApp (hsExp f) (hsExp x)
 hsExp (HsVar (UnQual name)) =
+    MirVar (hsName name)
+hsExp (HsCon (UnQual name)) =
     MirVar (hsName name)
 hsExp (HsInfixApp lhs (HsQVarOp op) rhs) =
     hsExp $ HsApp (HsApp (HsVar op) lhs) rhs
@@ -177,22 +193,64 @@ epilogueCpp =
 
 -- String: prefix to put in front of all lines
 declToCpp :: String -> MirDecl -> String
-declToCpp p d =
+declToCpp p fd@MirFunDecl{} =
+    funDeclToCpp p fd
+declToCpp p dd@MirDataDecl{} =
+    dataDeclToCpp p dd
+
+funDeclToCpp :: String -> MirDecl -> String
+funDeclToCpp p d =
    trace (show d ++ "\n") $
-   p ++ "struct " ++ (name d) ++ " {\n" ++
-   declToCppInner (p ++ "    ") (args d) (value d) ++
+   (if not (null (args d)) then
+       p ++ (argListToCpp (args d) True) ++ "\n" ++
+       p ++ "struct " ++ (name d) ++ "_impl;\n\n" ++
+       p ++ "struct " ++ (name d) ++ " {\n" ++
+       funDeclToCppInner (p ++ "    ") (args d) (name d) (args d) ++
+       p ++ "};\n\n" ++
+       p ++ (argListToCpp (args d) True) ++ "\n"
+    else "") ++
+   p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ " {\n" ++
+   p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;\n" ++
    p ++ "};\n\n"
 
-declToCppInner :: String -> [String] -> MirExp -> String
-declToCppInner p [] v =
-    p ++ "using value = " ++ (expToCpp v True) ++ "::value;\n"
-declToCppInner p (a:as) v =
+-- Send the [MirArg] = (args d) argument twice
+funDeclToCppInner :: String -> [MirArg] -> String -> [MirArg] -> String
+funDeclToCppInner p [] n args =
+    p ++ "using value = typename " ++ n ++ "_impl" ++ (argListToCpp args False) ++ "::value;\n"
+funDeclToCppInner p ((MirArgVar a):as) n args =
     p ++ "struct value {\n" ++
     p ++ "    template <typename " ++ a ++ ">\n" ++
     p ++ "    struct call {\n" ++
-    declToCppInner (p ++ "        ") as v ++
+    funDeclToCppInner (p ++ "        ") as n args ++
     p ++ "    };\n" ++
     p ++ "};\n\n"
+funDeclToCppInner p ((MirArgPat a):as) n args =
+    p ++ "struct value {\n" ++
+    p ++ "    template <typename T>\n" ++
+    p ++ "    struct call;\n\n" ++
+    p ++ "    template <>\n" ++
+    p ++ "    struct call<" ++ a ++ "> {\n" ++
+    funDeclToCppInner (p ++ "        ") as n args ++
+    p ++ "    };\n" ++
+    p ++ "};\n\n"
+
+-- Bool: is a definition?
+argListToCpp :: [MirArg] -> Bool -> String
+argListToCpp args def =
+    (\x -> (if def then "template " else "") ++ "<" ++ x ++ ">") $
+    concat $ intersperse ", " $ (if def then fmap ((++) "class ") else id) $ fmap argToCpp args
+
+argToCpp :: MirArg -> String
+argToCpp (MirArgVar v) = v
+argToCpp (MirArgPat p) = p
+
+dataDeclToCpp :: String -> MirDecl -> String
+dataDeclToCpp p d =
+    concat (fmap (ctorToCpp p) (ctors d))
+
+ctorToCpp :: String -> String -> String
+ctorToCpp p name =
+    p ++ "struct " ++ name ++ " {};\n\n"
 
 -- Bool : With maybe prefixing "typename "
 expToCpp :: MirExp -> Bool -> String
