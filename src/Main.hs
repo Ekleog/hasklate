@@ -202,43 +202,60 @@ funDeclToCpp :: String -> MirDecl -> String
 funDeclToCpp p d =
    trace (show d ++ "\n") $
    (if not (null (args d)) then
-       p ++ (argListToCpp (args d) True) ++ "\n" ++
+     let as = fmap ((++) "Arg" . show) [1 .. length (args d)] in
+       "#ifndef DEFINED_" ++ (name d) ++ "\n" ++
+       "#define DEFINED_" ++ (name d) ++ " 1\n" ++
+       p ++ (argListToCpp as True) ++ "\n" ++
        p ++ "struct " ++ (name d) ++ "_impl;\n\n" ++
        p ++ "struct " ++ (name d) ++ " {\n" ++
-       funDeclToCppInner (p ++ "    ") (args d) (name d) (args d) ++
-       p ++ "};\n\n" ++
-       p ++ (argListToCpp (args d) True) ++ "\n"
+       funDeclToCppInner (p ++ "    ") as (name d) as ++
+       p ++ "};\n" ++
+       "#endif // DEFINED_" ++ (name d) ++ "\n\n"
     else "") ++
-   p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ " {\n" ++
+   p ++ (tplArgListToCpp (args d)) ++ "\n" ++
+   p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d)) ++ " {\n" ++
    p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;\n" ++
    p ++ "};\n\n"
 
--- Send the [MirArg] = (args d) argument twice
-funDeclToCppInner :: String -> [MirArg] -> String -> [MirArg] -> String
+-- Send the [String] argument list twice
+funDeclToCppInner :: String -> [String] -> String -> [String] -> String
 funDeclToCppInner p [] n args =
     p ++ "using value = typename " ++ n ++ "_impl" ++ (argListToCpp args False) ++ "::value;\n"
-funDeclToCppInner p ((MirArgVar a):as) n args =
+funDeclToCppInner p (a:as) n args =
     p ++ "struct value {\n" ++
     p ++ "    template <typename " ++ a ++ ">\n" ++
     p ++ "    struct call {\n" ++
     funDeclToCppInner (p ++ "        ") as n args ++
     p ++ "    };\n" ++
     p ++ "};\n\n"
-funDeclToCppInner p ((MirArgPat a):as) n args =
-    p ++ "struct value {\n" ++
-    p ++ "    template <typename T>\n" ++
-    p ++ "    struct call;\n\n" ++
-    p ++ "    template <>\n" ++
-    p ++ "    struct call<" ++ a ++ "> {\n" ++
-    funDeclToCppInner (p ++ "        ") as n args ++
-    p ++ "    };\n" ++
-    p ++ "};\n\n"
 
 -- Bool: is a definition?
-argListToCpp :: [MirArg] -> Bool -> String
+argListToCpp :: [String] -> Bool -> String
 argListToCpp args def =
     (\x -> (if def then "template " else "") ++ "<" ++ x ++ ">") $
-    concat $ intersperse ", " $ (if def then fmap ((++) "class ") else id) $ fmap argToCpp args
+    concat $ intersperse ", " $ (if def then fmap ((++) "class ") else id) args
+
+tplArgListToCpp :: [MirArg] -> String
+tplArgListToCpp args =
+    if null args then "" else
+    (\x -> "template <" ++ x ++ ">") $
+    concat $ intersperse ", " $ fmap ((++) "class ") $ variablesToBind args
+
+tplSpecToCpp :: [MirArg] -> String
+tplSpecToCpp args =
+    if null args || doesNotSpecialize args then "" else
+    (\x -> "<" ++ x ++ ">") $
+    concat $ intersperse ", " $ fmap argToCpp args
+
+doesNotSpecialize :: [MirArg] -> Bool
+doesNotSpecialize [] = True
+doesNotSpecialize ((MirArgVar _):tl) = doesNotSpecialize tl
+doesNotSpecialize ((MirArgPat _):_) = False
+
+variablesToBind :: [MirArg] -> [String]
+variablesToBind [] = []
+variablesToBind ((MirArgVar v):tl) = v : variablesToBind tl
+variablesToBind ((MirArgPat p):tl) = variablesToBind tl
 
 argToCpp :: MirArg -> String
 argToCpp (MirArgVar v) = v
