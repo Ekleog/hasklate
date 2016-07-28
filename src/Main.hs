@@ -14,16 +14,20 @@ import Debug.Trace
 -- Data declarations
 data MirExp = MirInt Integer
             | MirApp MirExp MirExp -- f x
+            | MirCons String [MirExp]
             | MirVar String
             | MirIf MirExp MirExp MirExp -- cond true false
     deriving Show
 
 data MirArg = MirArgVar String
-            | MirArgPat String
+            | MirArgPat String [MirArg]
+    deriving Show
+
+data MirCtor = MirCtor {ctor :: String, ctorArgs :: [String]}
     deriving Show
 
 data MirDecl = MirFunDecl  {name :: String, value :: MirExp, args :: [MirArg]}
-             | MirDataDecl {name :: String, ctors :: [String]}
+             | MirDataDecl {name :: String, ctors :: [MirCtor]}
     deriving Show
 
 type Mir = [MirDecl]
@@ -80,20 +84,25 @@ declToMir (HsPatBind src (HsPVar pat) rhs decls) =
 declToMir x =
     trace (show x) $ [MirFunDecl {name = "UNIMPLEMENTED", value = MirInt 42, args = []}] -- fallback :'(
 
+stupidArgList :: Int -> [String]
+stupidArgList l = fmap ((++) "Arg" . show) [1 .. l]
+
 matchToMir :: HsMatch -> MirDecl
 matchToMir m@(HsMatch src name pats rhs decls) =
     trace (show m) $
     MirFunDecl {name = hsName name, value = hsValue rhs, args = fmap hsPat pats}
 
-hsConDecl :: HsConDecl -> String
-hsConDecl (HsConDecl _ name _) =
-    hsName name
+hsConDecl :: HsConDecl -> MirCtor
+hsConDecl c@(HsConDecl _ name args) =
+    trace (show c) $ MirCtor {ctor = hsName name, ctorArgs = stupidArgList (length args)}
 
 hsPat :: HsPat -> MirArg
 hsPat (HsPVar v) =
     MirArgVar (hsName v)
-hsPat (HsPApp (UnQual name) []) =
-    MirArgPat (hsName name)
+hsPat (HsPApp (UnQual name) args) =
+    MirArgPat (hsName name) (fmap hsPat args)
+hsPat (HsPParen x) =
+    hsPat x
 
 hsName :: HsName -> String
 hsName (HsIdent name) =
@@ -109,7 +118,7 @@ hsExp :: HsExp -> MirExp
 hsExp (HsLit (HsInt i)) =
     MirInt i
 hsExp (HsApp f x) =
-    MirApp (hsExp f) (hsExp x)
+    trace (show (HsApp f x)) $ MirApp (hsExp f) (hsExp x)
 hsExp (HsVar (UnQual name)) =
     MirVar (hsName name)
 hsExp (HsCon (UnQual name)) =
@@ -202,7 +211,7 @@ funDeclToCpp :: String -> MirDecl -> String
 funDeclToCpp p d =
    trace (show d ++ "\n") $
    (if not (null (args d)) then
-     let as = fmap ((++) "Arg" . show) [1 .. length (args d)] in
+     let as = stupidArgList (length (args d)) in
        "#ifndef DEFINED_" ++ (name d) ++ "\n" ++
        "#define DEFINED_" ++ (name d) ++ " 1\n" ++
        p ++ (argListToCpp as True) ++ "\n" ++
@@ -213,14 +222,14 @@ funDeclToCpp p d =
        "#endif // DEFINED_" ++ (name d) ++ "\n\n"
     else "") ++
    p ++ (tplArgListToCpp (args d)) ++ "\n" ++
-   p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d)) ++ " {\n" ++
+   p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d) False) ++ " {\n" ++
    p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;\n" ++
    p ++ "};\n\n"
 
 -- Send the [String] argument list twice
 funDeclToCppInner :: String -> [String] -> String -> [String] -> String
 funDeclToCppInner p [] n args =
-    p ++ "using value = typename " ++ n ++ "_impl" ++ (argListToCpp args False) ++ "::value;\n"
+    p ++ "using value = typename " ++ n ++ "_impl" ++ (argListToCpp (fmap ((++) "typename ") $ fmap (flip (++) "::value") args) False) ++ "::value;\n"
 funDeclToCppInner p (a:as) n args =
     p ++ "struct value {\n" ++
     p ++ "    template <typename " ++ a ++ ">\n" ++
@@ -241,33 +250,61 @@ tplArgListToCpp args =
     (\x -> "template <" ++ x ++ ">") $
     concat $ intersperse ", " $ fmap ((++) "class ") $ variablesToBind args
 
-tplSpecToCpp :: [MirArg] -> String
-tplSpecToCpp args =
-    if null args || doesNotSpecialize args then "" else
+tplSpecToCpp :: [MirArg] -> Bool -> String
+tplSpecToCpp args alwaysSpecializes =
+    if null args || (not alwaysSpecializes && doesNotSpecialize args) then "" else
     (\x -> "<" ++ x ++ ">") $
     concat $ intersperse ", " $ fmap argToCpp args
 
 doesNotSpecialize :: [MirArg] -> Bool
 doesNotSpecialize [] = True
 doesNotSpecialize ((MirArgVar _):tl) = doesNotSpecialize tl
-doesNotSpecialize ((MirArgPat _):_) = False
+doesNotSpecialize ((MirArgPat _ _):_) = False
 
 variablesToBind :: [MirArg] -> [String]
 variablesToBind [] = []
 variablesToBind ((MirArgVar v):tl) = v : variablesToBind tl
-variablesToBind ((MirArgPat p):tl) = variablesToBind tl
+variablesToBind ((MirArgPat p as):tl) = variablesToBind tl ++ variablesToBind as
 
 argToCpp :: MirArg -> String
 argToCpp (MirArgVar v) = v
-argToCpp (MirArgPat p) = p
+argToCpp (MirArgPat p as) = p ++ "_impl" ++ tplSpecToCpp as True
 
 dataDeclToCpp :: String -> MirDecl -> String
 dataDeclToCpp p d =
     concat (fmap (ctorToCpp p) (ctors d))
 
-ctorToCpp :: String -> String -> String
-ctorToCpp p name =
-    p ++ "struct " ++ name ++ " {};\n\n"
+ctorArgListToCpp :: [String] -> String
+ctorArgListToCpp args =
+    if null args then "" else
+    "<" ++ (concat $ intersperse ", " $ fmap ((++) "class ")  args) ++ ">"
+
+ctorToCpp :: String -> MirCtor -> String
+ctorToCpp p ct =
+    if null (ctorArgs ct) then
+        p ++ "struct " ++ (ctor ct) ++ "_impl {};\n\n" ++
+        p ++ "struct " ++ (ctor ct) ++ " {\n" ++
+        p ++ "    using value = " ++ (ctor ct) ++ "_impl;\n" ++
+        p ++ "};\n\n"
+    else
+        let as = stupidArgList (length (ctorArgs ct)) in
+        p ++ "template " ++ (ctorArgListToCpp (ctorArgs ct)) ++ "\n" ++
+        p ++ "struct " ++ (ctor ct) ++ "_impl {};\n\n" ++
+        p ++ "struct " ++ (ctor ct) ++ " {\n" ++
+        ctorToCppInner (p ++ "    ") as (ctor ct) as ++
+        p ++ "};\n\n"
+
+-- Send the [String] argument list twice
+ctorToCppInner :: String -> [String] -> String -> [String] -> String
+ctorToCppInner p [] n args =
+    p ++ "using value = " ++ n ++ "_impl" ++ (argListToCpp args False) ++ ";\n"
+ctorToCppInner p (a:as) n args =
+    p ++ "struct value {\n" ++
+    p ++ "    template <class " ++ a ++ ">\n" ++
+    p ++ "    struct call {\n" ++
+    ctorToCppInner (p ++ "        ") as n args ++
+    p ++ "    };\n" ++
+    p ++ "};\n\n"
 
 -- Bool : With maybe prefixing "typename "
 expToCpp :: MirExp -> Bool -> String
