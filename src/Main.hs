@@ -40,7 +40,7 @@ type Mir = [MirDecl]
 type CppMonad a = WriterT [String] (State (S.Set String)) a
 
 tellOne :: String -> CppMonad ()
-tellOne = tell . (:[])
+tellOne x = tell [x]
 
 indent :: CppMonad () -> CppMonad ()
 indent = censor $ fmap ("    "++)
