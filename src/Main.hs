@@ -8,6 +8,8 @@ import Language.Haskell.Pretty
 import Language.Haskell.Syntax
 import System.Environment
 import Text.Printf
+import Control.Monad.State.Strict
+import qualified Data.Set as S
 
 import Debug.Trace
 
@@ -31,6 +33,9 @@ data MirDecl = MirFunDecl  {name :: String, value :: MirExp, args :: [MirArg]}
     deriving Show
 
 type Mir = [MirDecl]
+
+
+type CppMonad a = State (S.Set String) a
 
 -- Symbol declarations
 symbols :: [String]
@@ -132,7 +137,7 @@ hsExp (HsParen exp) =
 
 toCpp :: Mir -> String
 toCpp x =
-    prologueCpp ++ concat (fmap (declToCpp "") x) ++ epilogueCpp
+    prologueCpp ++ concat (evalState (mapM (declToCpp "") x) S.empty) ++ epilogueCpp
 
 prologueCpp :: String
 prologueCpp =
@@ -201,30 +206,37 @@ epilogueCpp =
    \}\n"
 
 -- String: prefix to put in front of all lines
-declToCpp :: String -> MirDecl -> String
+declToCpp :: String -> MirDecl -> CppMonad String
 declToCpp p fd@MirFunDecl{} =
     funDeclToCpp p fd
 declToCpp p dd@MirDataDecl{} =
-    dataDeclToCpp p dd
+    return $ dataDeclToCpp p dd
 
-funDeclToCpp :: String -> MirDecl -> String
-funDeclToCpp p d =
-   trace (show d ++ "\n") $
-   (if not (null (args d)) then
-     let as = stupidArgList (length (args d)) in
-       "#ifndef DEFINED_" ++ (name d) ++ "\n" ++
-       "#define DEFINED_" ++ (name d) ++ " 1\n" ++
-       p ++ (argListToCpp as True) ++ "\n" ++
-       p ++ "struct " ++ (name d) ++ "_impl;\n\n" ++
-       p ++ "struct " ++ (name d) ++ " {\n" ++
-       funDeclToCppInner (p ++ "    ") as (name d) as ++
-       p ++ "};\n" ++
-       "#endif // DEFINED_" ++ (name d) ++ "\n\n"
-    else "") ++
-   p ++ (tplArgListToCpp (args d)) ++ "\n" ++
-   p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d) False) ++ " {\n" ++
-   p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;\n" ++
-   p ++ "};\n\n"
+
+declOnce :: String -> MirDecl -> CppMonad String
+declOnce p d = do
+    definedNames <- get
+    put $ S.insert (name d) definedNames
+    return $
+        if not (null (args d)) && not (S.member (name d) definedNames) then
+          let as = stupidArgList (length (args d)) in
+            p ++ (argListToCpp as True) ++ "\n" ++
+            p ++ "struct " ++ (name d) ++ "_impl;\n\n" ++
+            p ++ "struct " ++ (name d) ++ " {\n" ++
+            funDeclToCppInner (p ++ "    ") as (name d) as ++
+            p ++ "};\n"
+         else ""
+
+funDeclToCpp :: String -> MirDecl -> CppMonad String
+funDeclToCpp p d = do
+   traceM (show d ++ "\n")
+   decl <- declOnce p d
+   return $
+       decl ++
+       p ++ (tplArgListToCpp (args d)) ++ "\n" ++
+       p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d) False) ++ " {\n" ++
+       p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;\n" ++
+       p ++ "};\n\n"
 
 -- Send the [String] argument list twice
 funDeclToCppInner :: String -> [String] -> String -> [String] -> String
