@@ -9,6 +9,7 @@ import Language.Haskell.Syntax
 import System.Environment
 import Text.Printf
 import Control.Monad.State.Strict
+import Control.Monad.Writer.Strict
 import qualified Data.Set as S
 
 import Debug.Trace
@@ -35,7 +36,11 @@ data MirDecl = MirFunDecl  {name :: String, value :: MirExp, args :: [MirArg]}
 type Mir = [MirDecl]
 
 
-type CppMonad a = State (S.Set String) a
+-- Cpp Monad
+type CppMonad a = WriterT [String] (State (S.Set String)) a
+
+tellOne :: String -> CppMonad ()
+tellOne = tell . (:[])
 
 -- Symbol declarations
 symbols :: [String]
@@ -137,7 +142,13 @@ hsExp (HsParen exp) =
 
 toCpp :: Mir -> String
 toCpp x =
-    prologueCpp ++ concat (evalState (mapM (declToCpp "") x) S.empty) ++ epilogueCpp
+    let cpp =
+            flip evalState S.empty $
+            execWriterT $
+                forM x (declToCpp "")
+    in
+    prologueCpp ++ unlines cpp ++ epilogueCpp
+
 
 prologueCpp :: String
 prologueCpp =
@@ -206,49 +217,45 @@ epilogueCpp =
    \}\n"
 
 -- String: prefix to put in front of all lines
-declToCpp :: String -> MirDecl -> CppMonad String
+declToCpp :: String -> MirDecl -> CppMonad ()
 declToCpp p fd@MirFunDecl{} =
     funDeclToCpp p fd
 declToCpp p dd@MirDataDecl{} =
-    return $ dataDeclToCpp p dd
+    dataDeclToCpp p dd
 
 
-declOnce :: String -> MirDecl -> CppMonad String
+declOnce :: String -> MirDecl -> CppMonad ()
 declOnce p d = do
     definedNames <- get
     put $ S.insert (name d) definedNames
-    return $
-        if not (null (args d)) && not (S.member (name d) definedNames) then
-          let as = stupidArgList (length (args d)) in
-            p ++ (argListToCpp as True) ++ "\n" ++
-            p ++ "struct " ++ (name d) ++ "_impl;\n\n" ++
-            p ++ "struct " ++ (name d) ++ " {\n" ++
-            funDeclToCppInner (p ++ "    ") as (name d) as ++
-            p ++ "};\n"
-         else ""
+    when (not (null (args d)) && not (S.member (name d) definedNames)) $ do
+        let as = stupidArgList (length (args d))
+        tellOne $ p ++ (argListToCpp as True) ++ ""
+        tellOne $ p ++ "struct " ++ (name d) ++ "_impl;\n"
+        tellOne $ p ++ "struct " ++ (name d) ++ " {"
+        funDeclToCppInner (p ++ "    ") as (name d) as
+        tellOne $ p ++ "};"
 
-funDeclToCpp :: String -> MirDecl -> CppMonad String
+funDeclToCpp :: String -> MirDecl -> CppMonad ()
 funDeclToCpp p d = do
    traceM (show d ++ "\n")
-   decl <- declOnce p d
-   return $
-       decl ++
-       p ++ (tplArgListToCpp (args d)) ++ "\n" ++
-       p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d) False) ++ " {\n" ++
-       p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;\n" ++
-       p ++ "};\n\n"
+   declOnce p d
+   tellOne $ p ++ (tplArgListToCpp (args d)) ++ ""
+   tellOne $ p ++ "struct " ++ (name d) ++ (if not (null (args d)) then "_impl" else "") ++ (tplSpecToCpp (args d) False) ++ " {"
+   tellOne $ p ++ "    using value = " ++ (expToCpp (value d) True) ++ "::value;"
+   tellOne $ p ++ "};\n"
 
 -- Send the [String] argument list twice
-funDeclToCppInner :: String -> [String] -> String -> [String] -> String
-funDeclToCppInner p [] n args =
-    p ++ "using value = typename " ++ n ++ "_impl" ++ (argListToCpp (fmap ((++) "typename ") $ fmap (flip (++) "::value") args) False) ++ "::value;\n"
-funDeclToCppInner p (a:as) n args =
-    p ++ "struct value {\n" ++
-    p ++ "    template <typename " ++ a ++ ">\n" ++
-    p ++ "    struct call {\n" ++
-    funDeclToCppInner (p ++ "        ") as n args ++
-    p ++ "    };\n" ++
-    p ++ "};\n\n"
+funDeclToCppInner :: String -> [String] -> String -> [String] -> CppMonad ()
+funDeclToCppInner p [] n args = do
+    tellOne $ p ++ "using value = typename " ++ n ++ "_impl" ++ (argListToCpp (fmap ((++) "typename ") $ fmap (flip (++) "::value") args) False) ++ "::value;"
+funDeclToCppInner p (a:as) n args = do
+    tellOne $ p ++ "struct value {"
+    tellOne $ p ++ "    template <typename " ++ a ++ ">"
+    tellOne $ p ++ "    struct call {"
+    funDeclToCppInner (p ++ "        ") as n args
+    tellOne $ p ++ "    };"
+    tellOne $ p ++ "};\n"
 
 -- Bool: is a definition?
 argListToCpp :: [String] -> Bool -> String
@@ -282,41 +289,40 @@ argToCpp :: MirArg -> String
 argToCpp (MirArgVar v) = v
 argToCpp (MirArgPat p as) = p ++ "_impl" ++ tplSpecToCpp as True
 
-dataDeclToCpp :: String -> MirDecl -> String
-dataDeclToCpp p d =
-    concat (fmap (ctorToCpp p) (ctors d))
+dataDeclToCpp :: String -> MirDecl -> CppMonad ()
+dataDeclToCpp p d = forM_ (ctors d) (ctorToCpp p)
 
 ctorArgListToCpp :: [String] -> String
 ctorArgListToCpp args =
     if null args then "" else
     "<" ++ (concat $ intersperse ", " $ fmap ((++) "class ")  args) ++ ">"
 
-ctorToCpp :: String -> MirCtor -> String
+ctorToCpp :: String -> MirCtor -> CppMonad ()
 ctorToCpp p ct =
-    if null (ctorArgs ct) then
-        p ++ "struct " ++ (ctor ct) ++ "_impl {};\n\n" ++
-        p ++ "struct " ++ (ctor ct) ++ " {\n" ++
-        p ++ "    using value = " ++ (ctor ct) ++ "_impl;\n" ++
-        p ++ "};\n\n"
-    else
-        let as = stupidArgList (length (ctorArgs ct)) in
-        p ++ "template " ++ (ctorArgListToCpp (ctorArgs ct)) ++ "\n" ++
-        p ++ "struct " ++ (ctor ct) ++ "_impl {};\n\n" ++
-        p ++ "struct " ++ (ctor ct) ++ " {\n" ++
-        ctorToCppInner (p ++ "    ") as (ctor ct) as ++
-        p ++ "};\n\n"
+    if null (ctorArgs ct) then do
+        tellOne $ p ++ "struct " ++ (ctor ct) ++ "_impl {};\n"
+        tellOne $ p ++ "struct " ++ (ctor ct) ++ " {"
+        tellOne $ p ++ "    using value = " ++ (ctor ct) ++ "_impl;"
+        tellOne $ p ++ "};\n"
+    else do
+        let as = stupidArgList (length (ctorArgs ct))
+        tellOne $ p ++ "template " ++ (ctorArgListToCpp (ctorArgs ct)) ++ ""
+        tellOne $ p ++ "struct " ++ (ctor ct) ++ "_impl {};\n"
+        tellOne $ p ++ "struct " ++ (ctor ct) ++ " {"
+        ctorToCppInner (p ++ "    ") as (ctor ct) as
+        tellOne $ p ++ "};\n"
 
 -- Send the [String] argument list twice
-ctorToCppInner :: String -> [String] -> String -> [String] -> String
+ctorToCppInner :: String -> [String] -> String -> [String] -> CppMonad ()
 ctorToCppInner p [] n args =
-    p ++ "using value = " ++ n ++ "_impl" ++ (argListToCpp args False) ++ ";\n"
-ctorToCppInner p (a:as) n args =
-    p ++ "struct value {\n" ++
-    p ++ "    template <class " ++ a ++ ">\n" ++
-    p ++ "    struct call {\n" ++
-    ctorToCppInner (p ++ "        ") as n args ++
-    p ++ "    };\n" ++
-    p ++ "};\n\n"
+    tellOne $ p ++ "using value = " ++ n ++ "_impl" ++ (argListToCpp args False) ++ ";"
+ctorToCppInner p (a:as) n args = do
+    tellOne $ p ++ "struct value {"
+    tellOne $ p ++ "    template <class " ++ a ++ ">"
+    tellOne $ p ++ "    struct call {"
+    ctorToCppInner (p ++ "        ") as n args
+    tellOne $ p ++ "    };"
+    tellOne $ p ++ "};\n"
 
 -- Bool : With maybe prefixing "typename "
 expToCpp :: MirExp -> Bool -> String
